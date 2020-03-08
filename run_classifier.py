@@ -338,7 +338,7 @@ def file_based_convert_examples_to_features(
 
 
 def file_based_input_fn_builder(input_file, seq_length, is_training,
-                                drop_remainder):
+                                drop_remainder, batch_size):
   """Creates an `input_fn` closure to be passed to TPUEstimator."""
 
   name_to_features = {
@@ -365,7 +365,6 @@ def file_based_input_fn_builder(input_file, seq_length, is_training,
 
   def input_fn(params):
     """The actual input function."""
-    batch_size = params["batch_size"]
 
     # For training, we want a lot of parallel reading and shuffling.
     # For eval, we want no shuffling and parallel reading doesn't matter.
@@ -819,9 +818,6 @@ def main(_):
     estimator = tf.estimator.Estimator(
       model_fn=model_fn,
       config=run_config,
-      train_batch_size=FLAGS.train_batch_size,
-      eval_batch_size=FLAGS.eval_batch_size,
-      predict_batch_size=FLAGS.predict_batch_size
     )
 
   if FLAGS.do_train:
@@ -842,7 +838,8 @@ def main(_):
         input_file=train_file,
         seq_length=FLAGS.max_seq_length,
         is_training=True,
-        drop_remainder=True)
+        drop_remainder=True,
+        batch_size=FLAGS.train_batch_size)
     if _cudart:
       try:
         cstatus = _cudart.cudaProfilerStart()
