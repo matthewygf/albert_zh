@@ -25,6 +25,7 @@ import modeling
 import optimization_finetuning as optimization
 import tokenization
 import tensorflow as tf
+import ctypes
 # from loss import bi_tempered_logistic_loss
 
 flags = tf.flags
@@ -124,6 +125,9 @@ flags.DEFINE_integer(
     "num_tpu_cores", 8,
     "Only used if `use_tpu` is True. Total number of TPU cores to use.")
 
+flags.DEFINE_integer(
+    "max_train_steps", None,
+    "Maximum number of training steps.")
 
 class InputExample(object):
   """A single training/test example for simple sequence classification."""
@@ -520,11 +524,18 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
       train_op = optimization.create_optimizer(
           total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
 
-      output_spec = tf.contrib.tpu.TPUEstimatorSpec(
+      if not FLAGS.use_tpu:
+        output_spec = tf.estimator.EstimatorSpec(
           mode=mode,
           loss=total_loss,
           train_op=train_op,
-          scaffold_fn=scaffold_fn)
+          scaffold=scaffold_fn)
+      else:
+        output_spec = tf.contrib.tpu.TPUEstimatorSpec(
+            mode=mode,
+            loss=total_loss,
+            train_op=train_op,
+            scaffold_fn=scaffold_fn)
     elif mode == tf.estimator.ModeKeys.EVAL:
 
       def metric_fn(per_example_loss, label_ids, logits, is_real_example):
@@ -780,6 +791,8 @@ def main(_):
     print("###length of total train_examples:",len(train_examples))
     num_train_steps = int(len(train_examples)/ FLAGS.train_batch_size * FLAGS.num_train_epochs)
     num_warmup_steps = int(num_train_steps * FLAGS.warmup_proportion)
+    if FLAGS.max_train_steps:
+      num_train_steps = min(num_train_steps, FLAGS.max_train_steps)
 
   model_fn = model_fn_builder(
       bert_config=bert_config,
@@ -793,15 +806,29 @@ def main(_):
 
   # If TPU is not available, this will fall back to normal Estimator on CPU
   # or GPU.
-  estimator = tf.contrib.tpu.TPUEstimator(
-      use_tpu=FLAGS.use_tpu,
+  # Lies :/
+  if FLAGS.use_tpu:
+    estimator = tf.contrib.tpu.TPUEstimator(
+        use_tpu=FLAGS.use_tpu,
+        model_fn=model_fn,
+        config=run_config,
+        train_batch_size=FLAGS.train_batch_size,
+        eval_batch_size=FLAGS.eval_batch_size,
+        predict_batch_size=FLAGS.predict_batch_size)
+  else:
+    estimator = tf.estimator.Estimator(
       model_fn=model_fn,
       config=run_config,
       train_batch_size=FLAGS.train_batch_size,
       eval_batch_size=FLAGS.eval_batch_size,
-      predict_batch_size=FLAGS.predict_batch_size)
+      predict_batch_size=FLAGS.predict_batch_size
+    )
 
   if FLAGS.do_train:
+    try:
+      _cudart = ctypes.CDLL('libcudart.so')
+    except:
+      _cudart = None
     train_file = os.path.join(FLAGS.output_dir, "train.tf_record")
     train_file_exists=os.path.exists(train_file)
     print("###train_file_exists:", train_file_exists," ;train_file:",train_file)
@@ -816,7 +843,16 @@ def main(_):
         seq_length=FLAGS.max_seq_length,
         is_training=True,
         drop_remainder=True)
+    if _cudart:
+      try:
+        cstatus = _cudart.cudaProfilerStart()
+      except:
+        cstatus = None
+
     estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
+
+    if _cudart and cstatus == 0:
+      _cudart.cudaProfilerStop()
 
   if FLAGS.do_eval:
     eval_examples = processor.get_dev_examples(FLAGS.data_dir)
